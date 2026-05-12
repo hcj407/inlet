@@ -9,7 +9,7 @@ from compair import normal_shock as nos
 from compair import cone_shock as cone
 
 
-def coord(mach, delta, arg, ini, dist=0.025, ar=1.41, exp=6):
+def coord(mach, delta, arg, ini, dist=0.025, ar=1.41, exp=6, return_perp=False):
     '''
     mach : float
         Mach number
@@ -90,11 +90,13 @@ def coord(mach, delta, arg, ini, dist=0.025, ar=1.41, exp=6):
         b = np.append(b, np.pi/2)
     
     h = ini.getfloat('Design', 'throat-height')
-    
-    aa, bb = gr(b, d0, d, h)
+
+    aa, bb = gr(b, d0, d)
 
     # Solve Ax=b to get p1, p2, p_cowl (non-dimensionalized by h)
     x_ = np.linalg.solve(aa, bb).reshape(2, -1).T
+
+    cowl_perp = perpendicular_foot(x_[-1], x_[-2], d0[-1])
 
     sum_d = abs(sum(delta))
 
@@ -127,6 +129,9 @@ def coord(mach, delta, arg, ini, dist=0.025, ar=1.41, exp=6):
     x = np.vstack([x, x_[-1]])            
 
     # Return position
+    if return_perp:
+        return x, cowl_perp
+
     return x
 
 
@@ -160,22 +165,28 @@ def dat(ini, points, dmach, delta):
 
     # make cowl lip theta
     theta = ini.getfloat(sect, 'cowl-theta')
+    rotate_deg = ini.getfloat(sect, 'cowl-rotate')
 
-    # Check cowl theta to prevent cowl lip blunt shock
+    # Check inner and outer cowl lip angles to prevent blunt shock
     m, _, _, _ = max_pbr(dmach, delta)
     cum_delta = np.cumsum(delta)
-    rotate = ini.getfloat(sect, 'cowl-rotate')
-    eff = (theta + rotate) - cum_delta[-2]
-    _theta_max = obq.theta_max(m[-2]) - 10
-    if eff > _theta_max:
-        while eff > _theta_max:
-            print(f'Cowl angle is too large. theta_max = {_theta_max:.4f} deg')
-            theta = float(input('Cowl theta (deg): '))
-            eff = (theta + rotate) - cum_delta[-2]
-        theta = np.deg2rad(theta)
-    else:
-        print(f'Cowl angle is okay theta_max = {_theta_max:.4f} deg, cowl lip = {eff:.4f} deg')
-        theta = np.deg2rad(theta)
+    flow_angle = cum_delta[-2]
+    theta_max = obq.theta_max(m[-2]) - 10
+
+    inner_eff = rotate_deg - flow_angle
+    if inner_eff > theta_max:
+        rotate_deg = flow_angle + theta_max
+        inner_eff = theta_max
+        print(f'Inner cowl angle is too large. cowl-rotate is set to {rotate_deg:.4f} deg')
+
+    outer_eff = (theta + rotate_deg) - flow_angle
+    if outer_eff > theta_max:
+        theta = flow_angle + theta_max - rotate_deg
+        outer_eff = theta_max
+        print(f'Outer cowl angle is too large. cowl-theta is set to {theta:.4f} deg')
+
+    print(f'Cowl angle is okay theta_max = {theta_max:.4f} deg, inner lip = {inner_eff:.4f} deg, outer lip = {outer_eff:.4f} deg')
+    theta = np.deg2rad(theta)
     # _theta_max = obq.theta_max(dmach)
     # eff = theta + rotate
     # if eff > _theta_max:
@@ -195,7 +206,8 @@ def dat(ini, points, dmach, delta):
     cowl_out = np.array([cowl[0] + outer_length*np.cos(theta), cowl[1] + outer_length*np.sin(theta)])
 
     # rotate the cowl lip
-    if rotate := np.deg2rad(ini.getfloat(sect, 'cowl-rotate')):
+    if rotate_deg > 0:
+        rotate = np.deg2rad(rotate_deg)
 
         dx, dy = cowl_in[0] - cowl[0], cowl_in[1] - cowl[1]
         cowl_in = np.array([cowl[0] + dx*np.cos(rotate),
@@ -204,6 +216,7 @@ def dat(ini, points, dmach, delta):
         dx, dy = cowl_out[0] - cowl[0], cowl_out[1] - cowl[1]
         cowl_out = np.array([cowl[0] + dx*np.cos(rotate) - dy*np.sin(rotate),
                           cowl[1] + dx*np.sin(rotate) + dy*np.cos(rotate)])
+    
     # Throat height
     throat = np.sqrt((ramp[-1, 0] - cowl[0])**2 + (ramp[-1, 1] - cowl[1])**2)
     diffuser = np.insert(diffuser, 0, [cowl_in[0], cowl_in[1] - throat], axis=0)
@@ -458,7 +471,7 @@ def gmsh(ini):
         os.system(f"{gmsh} ./{path}/{name}.geo -2 -o ./{path}/{name}.msh -v 0")
 
 
-def gr(b, d0, d, h):
+def gr(b, d0, d):
     '''
     Geometric relations
 
@@ -466,50 +479,87 @@ def gr(b, d0, d, h):
     ---------
     b : ndarray
         Beta
+        b[0] = beta1
+        b[1] = beta2
+        b[2] = beta3
+        ...
+
     d0 : ndarray
         Cumulative delta
+        d0[0] = 0
+        d0[1] = d1
+        d0[2] = d1 + d2
+        d0[3] = d1 + d2 + d3
+        ...
+
     d : ndarray
         Delta
-    h : float
-        Throat height
+        d[0] = d1
+        d[1] = d2
+        d[2] = d3
+        ...
 
     Return
     ------
     aa : ndarray
+        Linear system matrix
 
     bb : ndarray
-
+        Right-hand side vector
     '''
-    # Geometric relations
+
     n = len(b)
-    n1 = n - 1
     aa = np.zeros((2*n, 2*n))
-
-    # Make matrix
-    aa[0, 0] = -np.tan(d0[0] + d[0])
-    aa[0, n] = 1
-    aa[2*n1-1, n-1] = -np.tan(d0[0] + b[0])
-    aa[2*n1-1, 2*n-1] = 1
-    aa[2*n-2, n-2] = 1
-    aa[2*n-2, n-1] = -1
-    aa[2*n-1, 2*n-2] = -1
-    aa[2*n-1, 2*n-1] = 1
-
     bb = np.zeros(2*n)
-    # bb[2*n-2] = np.sin(sum(d))*h
-    # bb[2*n-1] = np.cos(sum(d))*h
-    bb[2*n-2] = 0
-    bb[2*n-1] = h
 
-    for i in range(1, n1):
-        aa[i, i-1] = -np.tan(d0[i] + d[i])
-        aa[i, i] = -aa[i, i-1]
-        aa[i, n+i-1] = 1
-        aa[i, n+i] = -1
+    cowl = n - 1
+    row = 0
 
-        aa[2*n1-1-i, i-1] = -np.tan(d0[i] + b[i])
-        aa[2*n1-1-i, n-1] = -aa[2*n1-1-i, i-1]
-        aa[2*n1-1-i, n+i-1] = 1
-        aa[2*n1-1-i, 2*n-1] = -1
+    # The first ramp end point is fixed to a unit first-ramp length.
+    aa[row, 0] = 1
+    bb[row] = np.cos(d[0])
+    row += 1
+
+    aa[row, n] = 1
+    bb[row] = np.sin(d[0])
+    row += 1
+
+    # Downstream ramp points lie on their ramp lines.
+    for i in range(1, n-1):
+        angle = d0[i] + d[i]
+        m = np.tan(angle)
+
+        aa[row, i-1] = m
+        aa[row, i] = -m
+        aa[row, n+i-1] = -1
+        aa[row, n+i] = 1
+        row += 1
+
+    # The first shock line starts at the origin and meets the cowl lip.
+    m = np.tan(d0[0] + b[0])
+    aa[row, cowl] = -m
+    aa[row, n+cowl] = 1
+    row += 1
+
+    # The remaining shock lines start at each ramp point and meet the cowl lip.
+    for i in range(1, n):
+        angle = d0[i] + b[i]
+        m = np.tan(angle)
+        point = i - 1
+
+        aa[row, point] = m
+        aa[row, cowl] = -m
+        aa[row, n+point] = -1
+        aa[row, n+cowl] = 1
+        row += 1
 
     return aa, bb
+
+
+def perpendicular_foot(point, line_point, line_angle):
+    '''
+    Projection of point onto a line.
+    '''
+    direction = np.array([np.cos(line_angle), np.sin(line_angle)])
+    vec = point - line_point
+    return line_point + np.dot(vec, direction) * direction

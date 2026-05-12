@@ -25,6 +25,7 @@ class Oswatitsch:
         self.M0 = M0
         self.N = N
 
+    @staticmethod
     def oswatitsch(M0:float, t1:float, N:float):
         '''
         Parameter
@@ -111,3 +112,45 @@ class Oswatitsch:
             t1 = best.x
 
         return self.oswatitsch(M0, t1, N)
+
+    def find_target_pr(self, M0:float, N:int, target_tpr:float):
+        def err_tpr(t1):
+            output = self.oswatitsch(M0, t1, N)
+            if output is None:
+                return np.inf
+            return abs(output[0] - target_tpr)
+
+        bounds = (0.1, 89.9)
+        grid = np.linspace(bounds[0], bounds[1], 500)
+        vals = np.array([err_tpr(t1) for t1 in grid])
+
+        if not np.any(np.isfinite(vals)):
+            raise ValueError("No feasible ramp angle found.")
+
+        candidates = {int(np.nanargmin(vals))}
+        for i in range(1, len(grid)-1):
+            if vals[i] <= vals[i-1] and vals[i] <= vals[i+1]:
+                candidates.add(i)
+
+        best = None
+        for i in candidates:
+            left = grid[max(i-1, 0)]
+            right = grid[min(i+1, len(grid)-1)]
+            res = minimize_scalar(err_tpr, bounds=(left, right), method='bounded')
+
+            if not res.success or not np.isfinite(res.fun):
+                continue
+            if best is None or res.fun < best.fun:
+                best = res
+
+        if best is None:
+            i = int(np.nanargmin(vals))
+            t1 = grid[i]
+        else:
+            t1 = best.x
+
+        output = self.oswatitsch(M0, t1, N)
+        if output is None:
+            raise ValueError("Optimization finished at an infeasible ramp angle.")
+
+        return t1, *output[2]
